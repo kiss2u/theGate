@@ -25,11 +25,13 @@ jobs:
         sudo apt-get install -y \
           build-essential cmake clang llvm libelf-dev libbpf-dev \
           libncurses5-dev libssl-dev texinfo \
-          unzip help2man bc git wget cpio ccache rsync xorriso locales
+          unzip help2man bc git wget cpio ccache rsync xorriso locales \
+          linux-libc-dev
 
     # === 编译 xdns-bpf (CMake，GATEWAY 模式) ===
     - name: Build xdns-bpf
       run: |
+        export CPATH=/usr/include/x86_64-linux-gnu:/usr/include
         git clone https://github.com/liudf0716/xdns-bpf.git --depth=1 /tmp/xdns-bpf
         cmake -B /tmp/xdns-bpf/build -S /tmp/xdns-bpf -DXDNS_MODE=GATEWAY
         cmake --build /tmp/xdns-bpf/build
