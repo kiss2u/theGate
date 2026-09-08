@@ -1,0 +1,15 @@
+# Build artifacts
+buildroot/
+artifacts/
+
+# Persistent runtime files (on-host only)
+*.iso
+*.qcow2
+
+# OS / Editor
+.DS_Store
+*.swp
+*.swo
+*~
+.vscode/
+.idea/

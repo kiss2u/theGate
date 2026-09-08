@@ -1,0 +1,99 @@
+#!/bin/sh
+#
+# S99gateway - Gateway-Warrior Bootstrap Controller
+# 引导级最后拉起：磁盘自愈 → eBPF 挂载 → 服务拉起
+#
+
+DAEMON_NAME="gateway-warrior"
+LOG_FILE="/dev/kmsg"
+
+log_msg() {
+    echo "<4>$DAEMON_NAME: $1" > $LOG_FILE
+    echo "$DAEMON_NAME: $1"
+}
+
+start() {
+    log_msg "Initializing Pure eBPF Gateway Active Armor..."
+
+    # 1. 全自动格式化并挂载 PVE 读写虚拟硬盘
+    if [ -b /dev/vda ]; then
+        blkid /dev/vda >/dev/null 2>&1 || mkfs.ext4 -m 0 -F -E lazy_itable_init=0 /dev/vda
+        mkdir -p /mnt/data && mount -o noatime /dev/vda /mnt/data 2>/dev/null
+        if [ $? -eq 0 ]; then
+            mkdir -p /mnt/data/xray-lite /mnt/data/adguardhome /mnt/data/xdns
+            rm -rf /etc/xray-lite /var/AdGuardHome /etc/xdns 2>/dev/null
+            ln -sf /mnt/data/xray-lite /etc/xray-lite
+            ln -sf /mnt/data/adguardhome /var/AdGuardHome
+            ln -sf /mnt/data/xdns /etc/xdns
+            log_msg "Persistent disk mounted at /mnt/data"
+        fi
+    fi
+
+    # 2. 挂载内核 BPF 文件系统
+    mkdir -p /sys/fs/bpf
+    mountpoint -q /sys/fs/bpf 2>/dev/null || mount -t bpf bpf /sys/fs/bpf 2>/dev/null
+    log_msg "BPF filesystem ready"
+
+    # 3. QEMU Guest Agent (PVE 后台摘要 IP 显示)
+    if [ -f /usr/bin/qemu-ga ] || [ -f /usr/sbin/qemu-ga ]; then
+        log_msg "Starting QEMU Guest Agent..."
+        qemu-ga -d -m virtio-serial -p /dev/virtio-ports/org.qemu.guest_agent.0 2>/dev/null
+    fi
+
+    # 4. 拉起 AdGuardHome (去广告 DNS)
+    if [ -f /usr/bin/AdGuardHome ]; then
+        log_msg "Starting AdGuardHome..."
+        /usr/bin/AdGuardHome -w /var/AdGuardHome >/dev/null 2>&1 &
+    fi
+
+    # 5. 等待 DNS 就绪后拉起 xray-lite (代理核心)
+    sleep 2
+    if [ -f /usr/bin/xray-lite ]; then
+        log_msg "Starting xray-lite..."
+        /usr/bin/xray-lite -c /etc/xray-lite/config.json >/dev/null 2>&1 &
+    fi
+
+    # 6. 绑定 TC eBPF 过滤器 (xdns-bpf 分流)
+    INTERFACE="eth0"
+    if [ -d "/sys/class/net/$INTERFACE" ]; then
+        log_msg "Binding eBPF Engine to $INTERFACE..."
+        tc qdisc add dev $INTERFACE clsact 2>/dev/null
+        tc filter add dev $INTERFACE ingress bpf da obj /lib/bpf/xdns_bpf.o sec ingress 2>/dev/null
+        tc filter add dev $INTERFACE egress  bpf da obj /lib/bpf/xdns_bpf.o sec egress  2>/dev/null
+        if [ -f /usr/bin/xdns-ctl ] && [ -f /etc/xdns/proxy_domains.txt ]; then
+            log_msg "Loading proxy domain list..."
+            xdns-ctl reload-domains /etc/xdns/proxy_domains.txt 2>/dev/null
+        fi
+        log_msg "eBPF filter bound successfully"
+    fi
+
+    log_msg "Gateway-Warrior Active Armor ONLINE"
+}
+
+stop() {
+    log_msg "Shutting down Gateway-Warrior..."
+    pkill -SIGTERM qemu-ga 2>/dev/null
+    pkill -SIGTERM xray-lite 2>/dev/null
+    pkill -SIGTERM AdGuardHome 2>/dev/null
+    log_msg "All services terminated"
+}
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart)
+        stop
+        sleep 1
+        start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac
+
+exit 0
