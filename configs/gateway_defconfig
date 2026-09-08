@@ -7,10 +7,11 @@ BR2_TARGET_ROOTFS_TAR=n
 BR2_TARGET_ROOTFS_ISO9660_INITRD=y
 BR2_TARGET_ROOTFS_ISO9660_GRUB2=y
 
-# === 系统基础 ===
 BR2_TARGET_GENERIC_HOSTNAME="gateway-warrior"
 BR2_TARGET_GENERIC_ISSUE="Welcome to Gateway-Warrior (Run-from-RAM)"
-BR2_ROOTFS_OVERLAY="../overlay"
+
+# === 内核片段 (eBPF / TC / TUN / VirtIO) ===
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="../configs/kernel.fragment"
 
 # === 网络核心包 ===
 BR2_PACKAGE_IPROUTE2=y

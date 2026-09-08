@@ -8,6 +8,9 @@ on:
 permissions:
   contents: read
 
+env:
+  WORK: ${{ github.workspace }}
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -19,86 +22,89 @@ jobs:
     - name: Set up Build Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential libncurses5-dev libssl-dev texinfo \
-          unzip help2man bc git wget cpio ccache rsync xorriso locales libelf-dev clang llvm \
-          libelf-dev libbpf-dev
+        sudo apt-get install -y \
+          build-essential cmake clang llvm libelf-dev libbpf-dev \
+          libncurses5-dev libssl-dev texinfo \
+          unzip help2man bc git wget cpio ccache rsync xorriso locales
 
-    - name: Clone Buildroot Toolchain
-      run: |
-        git clone https://github.com/buildroot/buildroot.git --depth=1 -b 2024.02.x
-
-    # 对齐目标内核头文件，编译 eBPF 字节码保证 ABI 与最终内核一致
-    - name: Prepare Kernel Headers
-      run: |
-        cd buildroot
-        make defconfig
-        make linux-headers
-
-    - name: Compile xdns-bpf from Source
+    # === 编译 xdns-bpf (CMake，GATEWAY 模式) ===
+    - name: Build xdns-bpf
       run: |
         git clone https://github.com/liudf0716/xdns-bpf.git --depth=1 /tmp/xdns-bpf
-        cd /tmp/xdns-bpf
-        KERNEL_HEADERS=$(ls -d /home/runner/work/thegate/thegate/buildroot/output/build/linux-*/usr/include 2>/dev/null | head -1)
-        if [ -z "$KERNEL_HEADERS" ]; then
-          echo "❌ 无法定位 Buildroot 内核头文件"
-          exit 1
-        fi
-        make KERNEL_HEADERS="$KERNEL_HEADERS" xdns_bpf.o xdns-ctl
-        cp xdns_bpf.o xdns-ctl /home/runner/work/thegate/thegate/
+        cmake -B /tmp/xdns-bpf/build -S /tmp/xdns-bpf -DXDNS_MODE=GATEWAY
+        cmake --build /tmp/xdns-bpf/build
+        ls -la /tmp/xdns-bpf/build/xdns_bpf.o /tmp/xdns-bpf/build/xdns-ctl
 
-    - name: Fetch Pre-built Static Binaries
+    # === 构建 Buildroot 骨架 ===
+    - name: Clone Buildroot
       run: |
-        cd /home/runner/work/thegate/thegate
+        git clone https://github.com/buildroot/buildroot.git --depth=1 -b 2024.02.x "$WORK/buildroot"
 
-        # xray-lite 最新 Release (linux-amd64)
+    - name: Assemble Rootfs Skeleton
+      run: |
+        SKEL="$WORK/buildroot/system/skeleton"
+        mkdir -p "$SKEL/lib/bpf" "$SKEL/usr/bin"
+
+        # xdns-bpf 产物
+        cp /tmp/xdns-bpf/build/xdns_bpf.o "$SKEL/lib/bpf/"
+        cp /tmp/xdns-bpf/build/xdns-ctl   "$SKEL/usr/bin/"
+        chmod +x "$SKEL/usr/bin/xdns-ctl"
+
+        # xray-lite 最新 Release — tarball 内单文件名为 xray-linux-amd64-xdp
         XL_URL=$(curl -s https://api.github.com/repos/undead-undead/xray-lite/releases/latest \
-          | grep "browser_download_url.*linux-amd64" | head -1 | cut -d '"' -f 4)
-        echo "xray-lite: $XL_URL"
-        wget -q "${XL_URL}" -O /tmp/xray-lite.tar.gz
+          | grep -o '"browser_download_url": "[^"]*linux-amd64.tar.gz"' | head -1 | cut -d '"' -f 4)
+        echo "xray-lite URL: $XL_URL"
+        wget -q "$XL_URL" -O /tmp/xray-lite.tar.gz
         tar -xzf /tmp/xray-lite.tar.gz -C /tmp/
-        mv /tmp/xray-lite* buildroot/system/skeleton/usr/bin/xray-lite
-        chmod +x buildroot/system/skeleton/usr/bin/xray-lite
+        mv /tmp/xray-linux-amd64-xdp "$SKEL/usr/bin/xray-lite"
+        chmod +x "$SKEL/usr/bin/xray-lite"
 
-        # AdGuardHome 最新 Release (linux_amd64)
+        # AdGuardHome 最新 Release — tarball 内含 AdGuardHome/AdGuardHome
         AGH_URL=$(curl -s https://api.github.com/repos/AdguardTeam/AdGuardHome/releases/latest \
-          | grep "browser_download_url.*linux_amd64.tar.gz" | head -1 | cut -d '"' -f 4)
-        echo "AdGuardHome: $AGH_URL"
-        wget -q "${AGH_URL}" -O /tmp/AdGuardHome.tar.gz
+          | grep -o '"browser_download_url": "[^"]*linux_amd64.tar.gz"' | head -1 | cut -d '"' -f 4)
+        echo "AdGuardHome URL: $AGH_URL"
+        wget -q "$AGH_URL" -O /tmp/AdGuardHome.tar.gz
         tar -xzf /tmp/AdGuardHome.tar.gz -C /tmp/
-        mv /tmp/AdGuardHome/AdGuardHome buildroot/system/skeleton/usr/bin/AdGuardHome
-        chmod +x buildroot/system/skeleton/usr/bin/AdGuardHome
+        mv /tmp/AdGuardHome/AdGuardHome "$SKEL/usr/bin/AdGuardHome"
+        chmod +x "$SKEL/usr/bin/AdGuardHome"
 
-    - name: Copy Local eBPF Artifacts
+    - name: Apply Overlay
       run: |
-        cd /home/runner/work/thegate/thegate
-        mkdir -p buildroot/system/skeleton/lib/bpf/
-        mkdir -p buildroot/system/skeleton/usr/bin/
-        cp xdns_bpf.o buildroot/system/skeleton/lib/bpf/
-        cp xdns-ctl   buildroot/system/skeleton/usr/bin/
-        chmod +x buildroot/system/skeleton/usr/bin/xdns-ctl
+        rsync -a "$WORK/overlay/" "$WORK/buildroot/system/skeleton/"
+        chmod +x "$WORK/buildroot/system/skeleton/etc/init.d/S99gateway"
 
-    - name: Apply Buildroot Config
+    # === 配置 Buildroot：defconfig → 追加自定义 → 合入内核片段 ===
+    - name: Configure Buildroot
       run: |
-        cd buildroot
+        cd "$WORK/buildroot"
         make defconfig
-        cat ../configs/gateway_defconfig >> .config
-        scripts/kconfig/merge_config.sh .config ../configs/kernel.fragment
+        cat "$WORK/configs/gateway_defconfig" >> .config
+        support/kconfig/merge_config.sh .config "$WORK/configs/kernel.fragment"
         make olddefconfig
+        echo "--- Final .config summary ---"
+        grep -E "^BR2_TARGET_ROOTFS_ISO|^BR2_PACKAGE_(IPROUTE|QEMU|LIBELF|LIBBPF|BPFTOOL|IPTABLES)" .config
 
-    - name: Enable Overlay + Apply Skeleton
+    - name: Compile ISO
       run: |
-        cd buildroot
-        # 将仓库 overlay 目录并入 Buildroot 骨架
-        rsync -a --exclude='.git' ../overlay/ system/skeleton/
-        chmod +x system/skeleton/etc/init.d/S99gateway
-
-    - name: Compile and Press ISO
-      run: |
-        cd buildroot
+        cd "$WORK/buildroot"
         make -j$(nproc)
 
-    - name: Export Ready ISO Artifact
+    - name: Rename ISO with Date
+      run: |
+        cd "$WORK/buildroot/output/images"
+        ISO_SRC="rootfs.iso9660"
+        ISO_DST="theGate_$(date +%Y%m%d).iso"
+        if [ ! -f "$ISO_SRC" ]; then
+          echo "❌ ISO not found: $ISO_SRC"
+          ls -la
+          exit 1
+        fi
+        cp "$ISO_SRC" "$ISO_DST"
+        echo "ISO_NAME=$ISO_DST" >> "$GITHUB_ENV"
+        echo "Built: $ISO_DST ($(stat -c %s "$ISO_DST") bytes)"
+
+    - name: Upload ISO Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: gateway-warrior-iso
-        path: buildroot/output/images/rootfs.iso
+        name: theGate-iso
+        path: buildroot/output/images/${{ env.ISO_NAME }}
