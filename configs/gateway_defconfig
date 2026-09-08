@@ -1,17 +1,23 @@
 # Gateway-Warrior Buildroot defconfig
 # 追加到默认 .config 后使用
 
+# === 目标架构 (必须 x86_64，否则 amd64 二进制被 check-arch 拒绝) ===
+BR2_x86_64=y
+
 # === 镜像格式 ===
 BR2_TARGET_ROOTFS_ISO9660=y
 BR2_TARGET_ROOTFS_TAR=n
 BR2_TARGET_ROOTFS_ISO9660_INITRD=y
 BR2_TARGET_ROOTFS_ISO9660_GRUB2=y
 
+# === 内核配置：用 buildroot board/pc/base，fragment 补 BPF/TC/TUN ===
+BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
+BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="board/pc/linux.config"
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="../configs/kernel.fragment"
+
+# === 系统 ===
 BR2_TARGET_GENERIC_HOSTNAME="gateway-warrior"
 BR2_TARGET_GENERIC_ISSUE="Welcome to Gateway-Warrior (Run-from-RAM)"
-
-# === 内核片段 (eBPF / TC / TUN / VirtIO) ===
-BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="../configs/kernel.fragment"
 
 # === 网络核心包 ===
 BR2_PACKAGE_IPROUTE2=y
@@ -31,3 +37,9 @@ BR2_PACKAGE_BPFTOOL=y
 # === 初始化系统 ===
 BR2_INIT_BUSYBOX=y
 BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV=y
+
+# === 禁用 pc defconfig 的磁盘镜像生成 (只产 ISO) ===
+# pc_x86_64_bios_defconfig 默认会调 genimage 生成 disk.img，我们不需要
+BR2_ROOTFS_POST_BUILD_SCRIPT=""
+BR2_ROOTFS_POST_IMAGE_SCRIPT=""
+BR2_TARGET_ROOTFS_EXT2=n

@@ -25,23 +25,39 @@ jobs:
         sudo apt-get install -y \
           build-essential cmake clang llvm libelf-dev libbpf-dev \
           libncurses5-dev libssl-dev texinfo \
-          unzip help2man bc git wget cpio ccache rsync xorriso locales \
-          linux-libc-dev
+          linux-headers-generic \
+          unzip help2man bc git wget cpio ccache rsync xorriso locales
 
-    # === 编译 xdns-bpf (CMake，GATEWAY 模式) ===
-    - name: Build xdns-bpf
-      run: |
-        export CPATH=/usr/include/x86_64-linux-gnu:/usr/include
-        git clone https://github.com/liudf0716/xdns-bpf.git --depth=1 /tmp/xdns-bpf
-        cmake -B /tmp/xdns-bpf/build -S /tmp/xdns-bpf -DXDNS_MODE=GATEWAY
-        cmake --build /tmp/xdns-bpf/build
-        ls -la /tmp/xdns-bpf/build/xdns_bpf.o /tmp/xdns-bpf/build/xdns-ctl
-
-    # === 构建 Buildroot 骨架 ===
+    # === 1. 先 clone buildroot ===
     - name: Clone Buildroot
       run: |
         git clone https://github.com/buildroot/buildroot.git --depth=1 -b 2024.02.x "$WORK/buildroot"
 
+    - name: Prepare Host Kernel Headers for BPF
+      run: |
+        # xdns-bpf 的 eBPF 字节码需要 asm/types.h 等内核头
+        # GitHub ubuntu runner 启用了 BTF，host kernel headers 即可满足编译
+        KH=$(ls -d /lib/modules/*/build/include 2>/dev/null | head -1)
+        if [ -z "$KH" ]; then
+          # fallback：用 linux-headers-generic 提供的 source
+          KH=$(ls -d /usr/src/linux-headers-*/include 2>/dev/null | head -1)
+        fi
+        echo "KERNEL_HEADERS=$KH" >> "$GITHUB_ENV"
+        echo "Using kernel headers: $KH"
+        ls "$KH/asm/types.h" || ls "$KH/asm-generic/types.h" || { echo "❌ no asm/types.h"; exit 1; }
+
+    # === 2. 编译 xdns-bpf (CMake，GATEWAY 模式) ===
+    - name: Build xdns-bpf
+      run: |
+        git clone https://github.com/liudf0716/xdns-bpf.git --depth=1 /tmp/xdns-bpf
+        # 把 CMakeLists 内写死的 -I/usr/include 改为指向 host 内核头，
+        # 解决 asm/types.h not found
+        sed -i "s|-I/usr/include|-I$KERNEL_HEADERS|g" /tmp/xdns-bpf/CMakeLists.txt
+        cmake -B /tmp/xdns-bpf/build -S /tmp/xdns-bpf -DXDNS_MODE=GATEWAY
+        cmake --build /tmp/xdns-bpf/build
+        ls -la /tmp/xdns-bpf/build/xdns_bpf.o /tmp/xdns-bpf/build/xdns-ctl
+
+    # === 3. 组装 rootfs 骨架 ===
     - name: Assemble Rootfs Skeleton
       run: |
         SKEL="$WORK/buildroot/system/skeleton"
@@ -75,16 +91,15 @@ jobs:
         rsync -a "$WORK/overlay/" "$WORK/buildroot/system/skeleton/"
         chmod +x "$WORK/buildroot/system/skeleton/etc/init.d/S99gateway"
 
-    # === 配置 Buildroot：defconfig → 追加自定义 → 合入内核片段 ===
+    # === 4. 配置 Buildroot：pc_x86_64_bios_defconfig → 追加自定义 ===
     - name: Configure Buildroot
       run: |
         cd "$WORK/buildroot"
-        make defconfig
+        make pc_x86_64_bios_defconfig
         cat "$WORK/configs/gateway_defconfig" >> .config
-        support/kconfig/merge_config.sh .config "$WORK/configs/kernel.fragment"
         make olddefconfig
         echo "--- Final .config summary ---"
-        grep -E "^BR2_TARGET_ROOTFS_ISO|^BR2_PACKAGE_(IPROUTE|QEMU|LIBELF|LIBBPF|BPFTOOL|IPTABLES)" .config
+        grep -E "^BR2_x86_64|^BR2_TARGET_ROOTFS_ISO|^BR2_PACKAGE_(IPROUTE|QEMU|LIBELF|LIBBPF|BPFTOOL|IPTABLES)|BR2_LINUX_KERNEL_CUSTOM_CONFIG" .config
 
     - name: Compile ISO
       run: |
