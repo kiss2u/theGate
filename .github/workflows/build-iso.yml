@@ -88,7 +88,7 @@ jobs:
         cd "$WORK/buildroot"
         make pc_x86_64_bios_defconfig
         cat "$WORK/configs/gateway_defconfig" >> .config
-        make olddefconfig
+        SKIP_LEGACY=y make olddefconfig
         echo "--- Final .config summary ---"
         grep -E "^BR2_x86_64|^BR2_TARGET_ROOTFS_ISO|^BR2_PACKAGE_(IPROUTE|QEMU|LIBELF|LIBBPF|BPFTOOL|IPTABLES)|BR2_LINUX_KERNEL_CUSTOM_CONFIG" .config
 
